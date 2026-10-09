@@ -12,6 +12,7 @@ const https = require('https');
 const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 
 // Default cache max age in hours
 const DEFAULT_MAX_AGE_HOURS = 24;
@@ -600,6 +601,11 @@ router.post('/epg/:sourceId/channels', async (req, res) => {
 router.get('/stream', async (req, res) => {
     const maxRetries = 2;
     let lastError = null;
+    const controller = new AbortController();
+    const onClose = () => {
+        if (!res.writableFinished) controller.abort();
+    };
+    res.once('close', onClose);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -628,10 +634,11 @@ router.get('/stream', async (req, res) => {
                 headers['Range'] = rangeHeader;
             }
 
-            const response = await fetch(url, { headers });
+            const response = await fetch(url, { headers, signal: controller.signal });
 
             // Retry on 5xx errors (transient upstream issues)
             if (response.status >= 500 && attempt < maxRetries) {
+                await response.body?.cancel();
                 console.log(`[Proxy] Upstream 5xx error (attempt ${attempt}/${maxRetries}), retrying in 500ms...`);
                 await new Promise(r => setTimeout(r, 500));
                 continue;
@@ -680,11 +687,21 @@ router.get('/stream', async (req, res) => {
                 return res.end();
             }
 
-            const firstChunk = Buffer.from(first.value);
+            // The manifest signature can be split across network chunks.
+            const prefixChunks = [Buffer.from(first.value)];
+            let prefixLength = prefixChunks[0].length;
+            while (prefixLength < 7) {
+                const next = await iterator.next();
+                if (next.done) break;
+                const chunk = Buffer.from(next.value);
+                prefixChunks.push(chunk);
+                prefixLength += chunk.length;
+            }
+            const firstChunk = Buffer.concat(prefixChunks);
 
             // Peek at first bytes to check for HLS manifest ({ #EXTM3U })
             const textPrefix = firstChunk.subarray(0, 7).toString('utf8');
-            const contentLooksLikeHls = textPrefix === '#EXTM3U';
+            const contentLooksLikeHls = textPrefix === '#EXTM3U' || /mpegurl/i.test(contentType);
 
             if (contentLooksLikeHls) {
                 // HLS Manifest: We must read the WHOLE manifest to rewrite it
@@ -701,6 +718,8 @@ router.get('/stream', async (req, res) => {
                 const finalUrl = response.url || url;
                 console.log(`[Proxy] Processing HLS manifest from: ${finalUrl.substring(0, 80)}...`);
                 res.set('Content-Type', 'application/vnd.apple.mpegurl');
+                // Rewriting URLs changes the manifest size.
+                res.removeHeader('Content-Length');
 
                 let manifest = buffer.toString('utf-8');
 
@@ -740,26 +759,27 @@ router.get('/stream', async (req, res) => {
                 return res.send(manifest);
             }
 
-            // Binary content (Video Segment or Key): Collect and send
+            // Forward video as it arrives. Live streams never reach EOF,
+            // and buffering VOD here would retain the entire file in memory.
             console.log(`[Proxy] Serving binary content (${contentType})`);
             res.set('Content-Type', contentType || 'application/octet-stream');
-
-            // For small files (like encryption keys), collect all data and send at once
-            // This ensures proper Content-Length and response completion
-            const chunks = [firstChunk];
-            let result = await iterator.next();
-            while (!result.done) {
-                chunks.push(Buffer.from(result.value));
-                result = await iterator.next();
-            }
-            const fullContent = Buffer.concat(chunks);
-
-            // Set Content-Length for proper client handling
-            res.set('Content-Length', fullContent.length);
-            res.send(fullContent);
+            const body = Readable.from((async function* () {
+                yield firstChunk;
+                let result = await iterator.next();
+                while (!result.done) {
+                    yield Buffer.from(result.value);
+                    result = await iterator.next();
+                }
+            })());
+            await pipeline(body, res);
             return; // Success - exit the retry loop
 
         } catch (err) {
+            if (controller.signal.aborted || res.destroyed) return;
+            if (res.headersSent) {
+                res.destroy(err);
+                return;
+            }
             lastError = err;
             console.error(`Stream proxy error (attempt ${attempt}/${maxRetries}):`, err.message);
             if (attempt < maxRetries) {
