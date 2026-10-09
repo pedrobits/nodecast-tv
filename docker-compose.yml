@@ -1,6 +1,13 @@
+# Portainer: Stacks -> Add stack -> Web editor.
+# Cole este Compose e preencha o painel "Environment variables":
+# JWT_SECRET        = sua chave de login (mantenha a mesma nas atualizações)
+# SENTRA_HUB_TOKEN  = seu token persistente do Sentra Hub
+# SENTRA_HUB_USERNAME = sentra-hub (padrão)
+# NODECAST_PORT    = 3000 (padrão)
+# Não é necessário carregar arquivo .env ou configurar env_file.
 services:
   nodecast-tv:
-    image: ghcr.io/technomancer702/nodecast-tv:latest
+    image: ghcr.io/pedrobits/nodecast-tv:latest
     ports:
       - "${NODECAST_PORT:-3000}:3000"
     volumes:
@@ -11,6 +18,8 @@ services:
       NODE_ENV: production
       PORT: "3000"
       JWT_SECRET: "${JWT_SECRET:?Set JWT_SECRET in the Portainer stack environment variables}"
+      SENTRA_HUB_TOKEN: "${SENTRA_HUB_TOKEN:-}"
+      SENTRA_HUB_USERNAME: "${SENTRA_HUB_USERNAME:-sentra-hub}"
 
 volumes:
   nodecast_data:

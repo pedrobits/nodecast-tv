@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const passport = require('passport');
 const { Strategy: JwtStrategy, ExtractJwt } = require('passport-jwt');
 const { Strategy: LocalStrategy } = require('passport-local');
+const { createHash, timingSafeEqual } = require('node:crypto');
 
 /**
  * Authentication and Authorization Module
@@ -13,6 +14,16 @@ const { Strategy: LocalStrategy } = require('passport-local');
 // JWT Secret - In production, use environment variable
 const JWT_SECRET = process.env.JWT_SECRET || 'nodecast-tv-secret-key-change-in-production';
 const JWT_EXPIRY = '24h';
+const SENTRA_HUB_TOKEN = process.env.SENTRA_HUB_TOKEN || '';
+const SENTRA_HUB_USERNAME = process.env.SENTRA_HUB_USERNAME || 'sentra-hub';
+
+if (SENTRA_HUB_TOKEN && SENTRA_HUB_TOKEN.length < 32) {
+    throw new Error('SENTRA_HUB_TOKEN must contain at least 32 characters');
+}
+
+const sentraTokenDigest = SENTRA_HUB_TOKEN
+    ? createHash('sha256').update(SENTRA_HUB_TOKEN).digest()
+    : null;
 
 /**
  * Hash password using bcrypt
@@ -33,6 +44,11 @@ async function verifyPassword(password, hash) {
  * Generate JWT token
  */
 function generateToken(user) {
+    // The dedicated account uses the same credential in every captured session.
+    if (SENTRA_HUB_TOKEN && user.username === SENTRA_HUB_USERNAME) {
+        return SENTRA_HUB_TOKEN;
+    }
+
     return jwt.sign(
         {
             id: user.id,
@@ -226,9 +242,30 @@ function configureOidcStrategy(findUserByOidcId, findUserByEmail, createUser) {
 }
 
 /**
- * Middleware: Require authentication using Passport JWT
+ * Middleware: Accept the Sentra integration token or a normal Passport JWT.
  */
-const requireAuth = passport.authenticate('jwt', { session: false });
+const requireJwt = passport.authenticate('jwt', { session: false });
+
+async function requireAuth(req, res, next) {
+    const token = ExtractJwt.fromAuthHeaderAsBearerToken()(req);
+    if (sentraTokenDigest && token) {
+        const digest = createHash('sha256').update(token).digest();
+        if (timingSafeEqual(digest, sentraTokenDigest)) {
+            try {
+                // Resolve the account on each request so deletion and role changes apply.
+                const user = await require('./db').users.getByUsername(SENTRA_HUB_USERNAME);
+                if (!user) {
+                    return res.status(401).json({ error: 'Sentra Hub account is not configured' });
+                }
+                req.user = { id: user.id, username: user.username, role: user.role };
+                return next();
+            } catch (err) {
+                return next(err);
+            }
+        }
+    }
+    return requireJwt(req, res, next);
+}
 
 /**
  * Middleware: Require admin role
