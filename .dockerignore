@@ -1,0 +1,14 @@
+.git
+.github
+node_modules
+data
+user_data
+transcode-cache
+.env
+.env.*
+*.log
+.DS_Store
+coverage
+dist
+release
+nodecast.patch

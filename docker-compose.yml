@@ -1,0 +1,16 @@
+services:
+  nodecast-tv:
+    image: ghcr.io/technomancer702/nodecast-tv:latest
+    ports:
+      - "${NODECAST_PORT:-3000}:3000"
+    volumes:
+      - nodecast_data:/app/data
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      JWT_SECRET: "${JWT_SECRET:?Set JWT_SECRET in the Portainer stack environment variables}"
+
+volumes:
+  nodecast_data:
